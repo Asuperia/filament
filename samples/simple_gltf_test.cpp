@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #include "common/arguments.h"
 
 #include <filamentapp/Config.h>
@@ -39,8 +38,8 @@
 
 #include <utils/NameComponentManager.h>
 
-#include <iostream>
 #include <fstream>
+#include <iostream>
 #include <string>
 
 #include <math/mat4.h>
@@ -68,41 +67,34 @@ struct App {
     FilamentAsset* asset = nullptr;
     NameComponentManager* names;
     MaterialProvider* materials;
-    MaterialSource materialSource = JITSHADER;
+    MaterialSource materialSource = UBERSHADER;
     ResourceLoader* resourceLoader = nullptr;
     gltfio::TextureProvider* stbDecoder = nullptr;
     gltfio::TextureProvider* ktxDecoder = nullptr;
-    int instanceToAnimate = -1;
-    std::vector<FilamentInstance*> instances;
+    FilamentInstance* instance;
 };
 
 static const char* DEFAULT_IBL = "assets/ibl/lightroom_14b";
 
 static void printUsage(char* name) {
     std::string exec_name(Path(name).getName());
-    std::string usage(
-        "SHOWCASE renders the specified glTF file with instancing\n"
-        "Usage:\n"
-        "    SHOWCASE [options] <gltf path>\n"
-        "Options:\n"
-        "   --help, -h\n"
-        "       Prints this message\n\n"
-        "API_USAGE"
-        "   --ibl=<path to cmgen IBL>, -i <path>\n"
-        "       Override the built-in IBL\n\n"
-        "   --num=<number of initial instances>, -n <num>\n"
-        "       Number of instances to start with (defaults to 0)\n\n"
-        "   --animate=<instance index>, -m <num>\n"
-        "       Instance to animate (defaults to all instances)\n\n"
-        "   --ubershader, -u\n"
-        "       Enable ubershaders (improves load time, adds shader complexity)\n\n"
-    );
+    std::string usage("SHOWCASE renders the specified glTF file with minimal features.\nPrimarily "
+                      "for early backend bringup.\n"
+                      "Usage:\n"
+                      "    SHOWCASE [options] <gltf path>\n"
+                      "Options:\n"
+                      "   --help, -h\n"
+                      "       Prints this message\n\n"
+                      "API_USAGE"
+                      "   --ibl=<path to cmgen IBL>, -i <path>\n"
+                      "       Override the built-in IBL\n\n");
     const std::string from("SHOWCASE");
     for (size_t pos = usage.find(from); pos != std::string::npos; pos = usage.find(from, pos)) {
         usage.replace(pos, from.length(), exec_name);
     }
     const std::string apiUsage("API_USAGE");
-    for (size_t pos = usage.find(apiUsage); pos != std::string::npos; pos = usage.find(apiUsage, pos)) {
+    for (size_t pos = usage.find(apiUsage); pos != std::string::npos;
+            pos = usage.find(apiUsage, pos)) {
         usage.replace(pos, apiUsage.length(), samples::getBackendAPIArgumentsUsage());
     }
     std::cout << usage;
@@ -110,17 +102,13 @@ static void printUsage(char* name) {
 
 static int handleCommandLineArguments(int argc, char* argv[], App* app) {
     static constexpr const char* OPTSTR = "ha:i:un:m:";
-    static const struct option OPTIONS[] = {
-        { "help",         no_argument,       nullptr, 'h' },
-        { "api",          required_argument, nullptr, 'a' },
-        { "ibl",          required_argument, nullptr, 'i' },
-        { "num",          required_argument, nullptr, 'n' },
-        { "animate",      required_argument, nullptr, 'm' },
-        { "ubershader",   no_argument,       nullptr, 'u' },
-        { nullptr, 0, nullptr, 0 }
-    };
+    static const struct option OPTIONS[] = { { "help", no_argument, nullptr, 'h' },
+        { "api", required_argument, nullptr, 'a' }, { "ibl", required_argument, nullptr, 'i' },
+        { nullptr, 0, nullptr, 0 } };
     int opt;
     int option_index = 0;
+    // Make WebGPU the default for this test
+    app->config.backend = Engine::Backend::WEBGPU;
     while ((opt = getopt_long(argc, argv, OPTSTR, OPTIONS, &option_index)) >= 0) {
         std::string arg(optarg ? optarg : "");
         switch (opt) {
@@ -131,17 +119,8 @@ static int handleCommandLineArguments(int argc, char* argv[], App* app) {
             case 'a':
                 app->config.backend = samples::parseArgumentsForBackend(arg);
                 break;
-            case 'm':
-                app->instanceToAnimate = atoi(arg.c_str());
-                break;
-            case 'n':
-                app->instances.resize(atoi(arg.c_str()));
-                break;
             case 'i':
                 app->config.iblDirectory = arg;
-                break;
-            case 'u':
-                app->materialSource = UBERSHADER;
                 break;
         }
     }
@@ -156,7 +135,7 @@ static std::ifstream::pos_type getFileSize(const char* filename) {
 int main(int argc, char** argv) {
     App app;
 
-    app.config.title = "glTF Instancing";
+    app.config.title = "simple glTF";
     app.config.iblDirectory = FilamentApp::getRootAssetsPath() + DEFAULT_IBL;
 
     int optionIndex = handleCommandLineArguments(argc, argv, &app);
@@ -188,7 +167,7 @@ int main(int argc, char** argv) {
 
         // Parse the glTF file and create Filament entities.
         app.asset = app.loader->createInstancedAsset(buffer.data(), buffer.size(),
-                app.instances.data(), app.instances.size());
+                &(app.instance), 1);
         buffer.clear();
         buffer.shrink_to_fit();
 
@@ -198,7 +177,7 @@ int main(int argc, char** argv) {
         }
     };
 
-    auto loadResources = [&app] (utils::Path filename) {
+    auto loadResources = [&app](utils::Path filename) {
         // Load external textures and buffers.
         std::string gltfPath = filename.getAbsolutePath();
         ResourceConfiguration configuration;
@@ -225,45 +204,26 @@ int main(int argc, char** argv) {
         }
     };
 
-    auto arrangeIntoCircle = [&app]() {
-        auto& tcm = app.engine->getTransformManager();
-        auto extent = app.asset->getBoundingBox().extent();
-        float max_extent = std::max(std::max(extent.x,  extent.y), extent.z);
-        auto translation = mat4f::translation(float3(max_extent, 0, 0));
-        for (size_t inst = 0; inst < app.instances.size(); ++inst) {
-            FilamentInstance* instance = app.instances[inst];
-            auto transformRoot = tcm.getInstance(instance->getRoot());
-            float theta = inst * 2.0 * M_PI / app.instances.size();
-            auto rotation = mat4f::rotation(theta, float3(0, 0, 1));
-            tcm.setTransform(transformRoot, rotation * translation);
-        }
-    };
-
     auto setup = [&](Engine* engine, View* view, Scene* scene) {
         app.engine = engine;
         app.names = new NameComponentManager(EntityManager::get());
         app.viewer = new ViewerGui(engine, scene, view);
 
-        app.materials = (app.materialSource == JITSHADER) ? createJitShaderProvider(engine) :
-                createUbershaderProvider(engine, UBERARCHIVE_DEFAULT_DATA, UBERARCHIVE_DEFAULT_SIZE);
+        app.materials = (app.materialSource == JITSHADER)
+                                ? createJitShaderProvider(engine)
+                                : createUbershaderProvider(engine, UBERARCHIVE_DEFAULT_DATA,
+                                          UBERARCHIVE_DEFAULT_SIZE);
 
-        app.loader = AssetLoader::create({engine, app.materials, app.names });
+        app.loader = AssetLoader::create({ engine, app.materials, app.names });
         if (filename.isEmpty()) {
-            app.asset = app.loader->createInstancedAsset(
-                    GLTF_DEMO_DAMAGEDHELMET_DATA, GLTF_DEMO_DAMAGEDHELMET_SIZE,
-                    app.instances.data(), app.instances.size());
+            app.asset = app.loader->createInstancedAsset(GLTF_DEMO_DAMAGEDHELMET_DATA,
+                    GLTF_DEMO_DAMAGEDHELMET_SIZE, &(app.instance), 1);
         } else {
             loadAsset(filename);
         }
 
-        FilamentInstance* instance = nullptr;
-        if (app.instanceToAnimate > -1 && app.instanceToAnimate < app.instances.size()) {
-            instance = app.instances[app.instanceToAnimate];
-        }
-
-        arrangeIntoCircle();
         loadResources(filename);
-        app.viewer->setAsset(app.asset, instance);
+        app.viewer->setAsset(app.asset, app.instance);
     };
 
     auto cleanup = [&app](Engine* engine, View*, Scene*) {
@@ -280,39 +240,17 @@ int main(int argc, char** argv) {
         AssetLoader::destroy(&app.loader);
     };
 
-    auto animate = [&app, arrangeIntoCircle](Engine* engine, View* view, double now) {
+    auto animate = [&app](Engine* engine, View* view, double now) {
         app.resourceLoader->asyncUpdateLoad();
         app.viewer->updateRootTransform();
         app.viewer->populateScene();
 
-        if (app.instanceToAnimate == -1) {
-            for (FilamentInstance* instance : app.instances) {
-                app.viewer->applyAnimation(now, instance);
-            }
-        } else {
-            app.viewer->applyAnimation(now);
-        }
-
-        // Add a new instance every second until reaching 100 instances.
-        static double previous = 0.0;
-        if (now - previous > 1.0 && app.asset->getAssetInstanceCount() < 100) {
-            FilamentInstance* instance = app.loader->createInstance(app.asset);
-
-            // If the asset has variants, rotate through each variant.
-            const size_t variantCount = instance->getMaterialVariantCount();
-            if (variantCount > 1) {
-                instance->applyMaterialVariant(app.instances.size() % variantCount);
-            }
-
-            app.instances.push_back(instance);
-            arrangeIntoCircle();
-            previous = now;
-        }
+        app.viewer->applyAnimation(now, app.instance);
     };
 
-    auto gui = [&app](Engine* engine, View* view) { };
+    auto gui = [&app](Engine* engine, View* view) {};
 
-    auto preRender = [&app](Engine* engine, View* view, Scene* scene, Renderer* renderer) { };
+    auto preRender = [&app](Engine* engine, View* view, Scene* scene, Renderer* renderer) {};
 
     FilamentApp& filamentApp = FilamentApp::get();
     filamentApp.animate(animate);
