@@ -85,7 +85,11 @@ VmaAllocator createAllocator(VkInstance instance, VkPhysicalDevice physicalDevic
         .vkGetImageMemoryRequirements2KHR = vkGetImageMemoryRequirements2KHR
 #endif
     };
-    VmaAllocatorCreateInfo const allocatorInfo {
+    VmaAllocatorCreateInfo const allocatorInfo{
+        // Disable the internal VMA synchronization because the backend is singled threaded.
+        // Improve CPU performance when using VMA functions. The backend will guarantee that all
+        // access to VMA is done in a thread safe way.
+        .flags = VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT,
         .physicalDevice = physicalDevice,
         .device = device,
         .pVulkanFunctions = &funcs,
@@ -100,15 +104,15 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugReportCallback(VkDebugReportFlagsEXT flags,
         VkDebugReportObjectTypeEXT objectType, uint64_t object, size_t location,
         int32_t messageCode, const char* pLayerPrefix, const char* pMessage, void* pUserData) {
     if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT) {
-        FVK_LOGE << "VULKAN ERROR: (" << pLayerPrefix << ") " << pMessage << utils::io::endl;
+        FVK_LOGE << "VULKAN ERROR: (" << pLayerPrefix << ") " << pMessage;
     } else {
         // TODO: emit best practices warnings about aggressive pipeline barriers.
         if (strstr(pMessage, "ALL_GRAPHICS_BIT") || strstr(pMessage, "ALL_COMMANDS_BIT")) {
             return VK_FALSE;
         }
-        FVK_LOGW << "VULKAN WARNING: (" << pLayerPrefix << ") " << pMessage << utils::io::endl;
+        FVK_LOGW << "VULKAN WARNING: (" << pLayerPrefix << ") " << pMessage;
     }
-    FVK_LOGE << utils::io::endl;
+    FVK_LOGE;
     return VK_FALSE;
 }
 #endif // FVK_ENABLED(FVK_DEBUG_VALIDATION)
@@ -118,18 +122,16 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugUtilsCallback(VkDebugUtilsMessageSeverityFla
         VkDebugUtilsMessageTypeFlagsEXT types, const VkDebugUtilsMessengerCallbackDataEXT* cbdata,
         void* pUserData) {
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-        FVK_LOGE << "VULKAN ERROR: (" << cbdata->pMessageIdName << ") " << cbdata->pMessage
-                 << utils::io::endl;
+        FVK_LOGE << "VULKAN ERROR: (" << cbdata->pMessageIdName << ") " << cbdata->pMessage;
     } else {
         // TODO: emit best practices warnings about aggressive pipeline barriers.
         if (strstr(cbdata->pMessage, "ALL_GRAPHICS_BIT")
                 || strstr(cbdata->pMessage, "ALL_COMMANDS_BIT")) {
             return VK_FALSE;
         }
-        FVK_LOGW << "VULKAN WARNING: (" << cbdata->pMessageIdName << ") " << cbdata->pMessage
-                 << utils::io::endl;
+        FVK_LOGW << "VULKAN WARNING: (" << cbdata->pMessageIdName << ") " << cbdata->pMessage;
     }
-    FVK_LOGE << utils::io::endl;
+    FVK_LOGE << "";
     return VK_FALSE;
 }
 #endif // FVK_ENABLED(FVK_DEBUG_DEBUG_UTILS)
@@ -210,7 +212,7 @@ VulkanDriver::VulkanDriver(VulkanPlatform* platform, VulkanContext const& contex
               mPlatform->getProtectedGraphicsQueueFamilyIndex(), &mContext),
       mPipelineLayoutCache(mPlatform->getDevice()),
       mPipelineCache(mPlatform->getDevice()),
-      mStagePool(mAllocator, &mCommands),
+      mStagePool(mAllocator, &mResourceManager, &mCommands, &mContext.getPhysicalDeviceLimits()),
       mBufferCache(context, mResourceManager, mAllocator),
       mFramebufferCache(mPlatform->getDevice()),
       mYcbcrConversionCache(mPlatform->getDevice()),
@@ -272,20 +274,18 @@ Driver* VulkanDriver::create(VulkanPlatform* platform, VulkanContext const& cont
     //    VulkanRenderTarget            : 312       few
     // -- less than or equal to 312 bytes
 
-    FVK_LOGD
-           << "\nVulkanSwapChain: " << sizeof(VulkanSwapChain)
-           << "\nVulkanBufferObject: " << sizeof(VulkanBufferObject)
-           << "\nVulkanVertexBuffer: " << sizeof(VulkanVertexBuffer)
-           << "\nVulkanVertexBufferInfo: " << sizeof(VulkanVertexBufferInfo)
-           << "\nVulkanIndexBuffer: " << sizeof(VulkanIndexBuffer)
-           << "\nVulkanRenderPrimitive: " << sizeof(VulkanRenderPrimitive)
-           << "\nVulkanTexture: " << sizeof(VulkanTexture)
-           << "\nVulkanTimerQuery: " << sizeof(VulkanTimerQuery)
-           << "\nHwStream: " << sizeof(HwStream)
-           << "\nVulkanRenderTarget: " << sizeof(VulkanRenderTarget)
-           << "\nVulkanFence: " << sizeof(VulkanFence)
-           << "\nVulkanProgram: " << sizeof(VulkanProgram)
-           << utils::io::endl;
+    FVK_LOGD << "VulkanSwapChain: " << sizeof(VulkanSwapChain);
+    FVK_LOGD << "VulkanBufferObject: " << sizeof(VulkanBufferObject);
+    FVK_LOGD << "VulkanVertexBuffer: " << sizeof(VulkanVertexBuffer);
+    FVK_LOGD << "VulkanVertexBufferInfo: " << sizeof(VulkanVertexBufferInfo);
+    FVK_LOGD << "VulkanIndexBuffer: " << sizeof(VulkanIndexBuffer);
+    FVK_LOGD << "VulkanRenderPrimitive: " << sizeof(VulkanRenderPrimitive);
+    FVK_LOGD << "VulkanTexture: " << sizeof(VulkanTexture);
+    FVK_LOGD << "VulkanTimerQuery: " << sizeof(VulkanTimerQuery);
+    FVK_LOGD << "HwStream: " << sizeof(HwStream);
+    FVK_LOGD << "VulkanRenderTarget: " << sizeof(VulkanRenderTarget);
+    FVK_LOGD << "VulkanFence: " << sizeof(VulkanFence);
+    FVK_LOGD << "VulkanProgram: " << sizeof(VulkanProgram);
 #endif
 
     assert_invariant(platform);
@@ -330,7 +330,6 @@ void VulkanDriver::terminate() {
     // descriptorSetLayoutCache
     mExternalImageManager.terminate();
 
-    mStagePool.terminate();
     mPipelineCache.terminate();
     mFramebufferCache.terminate();
     mSamplerCache.terminate();
@@ -345,6 +344,10 @@ void VulkanDriver::terminate() {
     // Before terminating the memory pool, we must make sure all the VulkanBufferMemory are yielded
     // back to the pool.
     mBufferCache.terminate();
+
+    // Before terminating stagePool, we need all resources to have been
+    // reclaimed, as they perform cleanup within the stage pool.
+    mStagePool.terminate();
 
 #if FVK_ENABLED(FVK_DEBUG_RESOURCE_LEAK)
     mResourceManager.print();
@@ -391,7 +394,13 @@ void VulkanDriver::collectGarbage() {
 void VulkanDriver::beginFrame(int64_t monotonic_clock_ns,
         int64_t refreshIntervalNs, uint32_t frameId) {
     FVK_PROFILE_MARKER(PROFILE_NAME_BEGINFRAME);
-    // Do nothing.
+
+    // Check if any command have finished and reset all its used resources. The resources
+    // wont be destroyed but their reference count will decreased if the command is already
+    // completed.
+    //
+    // This will let us check if any VulkanBuffer is currently in flight or not.
+    mCommands.gc();
 
     if (mAppState.hasExternalSamplers()) {
         mExternalImageManager.onBeginFrame();
@@ -792,14 +801,12 @@ void VulkanDriver::createSwapChainR(Handle<HwSwapChain> sch, void* nativeWindow,
     mResourceManager.gc();
 
     if ((flags & backend::SWAP_CHAIN_CONFIG_SRGB_COLORSPACE) != 0 && !isSRGBSwapChainSupported()) {
-        FVK_LOGW << "sRGB swapchain requested, but Platform does not support it"
-                 << utils::io::endl;
+        FVK_LOGW << "sRGB swapchain requested, but Platform does not support it";
         flags = flags | ~(backend::SWAP_CHAIN_CONFIG_SRGB_COLORSPACE);
     }
     if (flags & backend::SWAP_CHAIN_CONFIG_PROTECTED_CONTENT) {
         if (!isProtectedContentSupported()) {
-            FVK_LOGW << "protected swapchain requested, but Platform does not support it"
-                << utils::io::endl;
+            FVK_LOGW << "protected swapchain requested, but Platform does not support it";
         }
     }
     auto swapChain = resource_ptr<VulkanSwapChain>::make(&mResourceManager, sch, mPlatform,
@@ -810,8 +817,7 @@ void VulkanDriver::createSwapChainR(Handle<HwSwapChain> sch, void* nativeWindow,
 void VulkanDriver::createSwapChainHeadlessR(Handle<HwSwapChain> sch, uint32_t width,
         uint32_t height, uint64_t flags) {
     if ((flags & backend::SWAP_CHAIN_CONFIG_SRGB_COLORSPACE) != 0 && !isSRGBSwapChainSupported()) {
-        FVK_LOGW << "sRGB swapchain requested, but Platform does not support it"
-                      << utils::io::endl;
+        FVK_LOGW << "sRGB swapchain requested, but Platform does not support it";
         flags = flags | ~(backend::SWAP_CHAIN_CONFIG_SRGB_COLORSPACE);
     }
     assert_invariant(width > 0 && height > 0 && "Vulkan requires non-zero swap chain dimensions.");
@@ -1231,12 +1237,13 @@ void VulkanDriver::updateIndexBuffer(Handle<HwIndexBuffer> ibh, BufferDescriptor
     VulkanCommandBuffer& commands = mCommands.get();
     auto ib = resource_ptr<VulkanIndexBuffer>::cast(&mResourceManager, ibh);
     commands.acquire(ib);
-    ib->buffer.loadFromCpu(commands.buffer(), p.buffer, byteOffset, p.size);
+    ib->buffer.loadFromCpu(commands, p.buffer, byteOffset, p.size);
 
     scheduleDestroy(std::move(p));
 }
 
-void VulkanDriver::registerBufferObjectStreams(Handle<HwBufferObject> boh, BufferObjectStreamDescriptor&& streams) {
+void VulkanDriver::registerBufferObjectStreams(Handle<HwBufferObject> boh,
+        BufferObjectStreamDescriptor&& streams) {
     // Noop
 }
 
@@ -1246,7 +1253,7 @@ void VulkanDriver::updateBufferObject(Handle<HwBufferObject> boh, BufferDescript
 
     auto bo = resource_ptr<VulkanBufferObject>::cast(&mResourceManager, boh);
     commands.acquire(bo);
-    bo->buffer.loadFromCpu(commands.buffer(), bd.buffer, byteOffset, bd.size);
+    bo->buffer.loadFromCpu(commands, bd.buffer, byteOffset, bd.size);
 
     scheduleDestroy(std::move(bd));
 }
@@ -1257,7 +1264,7 @@ void VulkanDriver::updateBufferObjectUnsynchronized(Handle<HwBufferObject> boh,
     auto bo = resource_ptr<VulkanBufferObject>::cast(&mResourceManager, boh);
     commands.acquire(bo);
     // TODO: implement unsynchronized version
-    bo->buffer.loadFromCpu(commands.buffer(), bd.buffer, byteOffset, bd.size);
+    bo->buffer.loadFromCpu(commands, bd.buffer, byteOffset, bd.size);
     scheduleDestroy(std::move(bd));
 }
 
@@ -1299,7 +1306,7 @@ TimerQueryResult VulkanDriver::getTimerQueryValue(Handle<HwTimerQuery> tqh, uint
     uint64_t const end = results.endTime;
     if (begin >= end) {
         // TODO: queries might have ran on different command buffers.
-        FVK_LOGW << "Timestamps are not monotonically increasing. " << utils::io::endl;
+        FVK_LOGW << "Timestamps are not monotonically increasing. ";
         *elapsedTime = 0;
         return TimerQueryResult::ERROR;
     }
@@ -1630,8 +1637,8 @@ void VulkanDriver::readPixels(Handle<HwRenderTarget> src, uint32_t x, uint32_t y
     mReadPixels.run(
             srcTarget, x, y, width, height, mPlatform->getGraphicsQueueFamilyIndex(),
             std::move(pbd),
-            [&context = mContext](uint32_t reqs, VkFlags flags) {
-                return context.selectMemoryType(reqs, flags);
+            [&context = mContext](uint32_t types, VkFlags reqs) {
+                return context.selectMemoryType(types, reqs);
             },
             [this](PixelBufferDescriptor&& pbd) {
                 scheduleDestroy(std::move(pbd));
@@ -2037,7 +2044,7 @@ void VulkanDriver::debugCommandBegin(CommandStream* cmds, bool synchronous, cons
         assert_invariant(inRenderPass);
         inRenderPass = false;
     } else if (inRenderPass && OUTSIDE_COMMANDS.find(command) != OUTSIDE_COMMANDS.end()) {
-        FVK_LOGE << command.data() << " issued inside a render pass." << utils::io::endl;
+        FVK_LOGE << command.data() << " issued inside a render pass.";
     }
 #endif
 }

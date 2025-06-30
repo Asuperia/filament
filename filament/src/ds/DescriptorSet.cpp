@@ -25,12 +25,12 @@
 #include <backend/DriverEnums.h>
 #include <backend/Handle.h>
 
+#include <utils/Logger.h>
+#include <utils/Panic.h>
+#include <utils/StaticString.h>
 #include <utils/compiler.h>
 #include <utils/debug.h>
-#include <utils/Log.h>
-#include <utils/Panic.h>
 #include <utils/ostream.h>
-#include <utils/StaticString.h>
 
 #include <utility>
 #include <limits>
@@ -66,6 +66,7 @@ DescriptorSet& DescriptorSet::operator=(DescriptorSet&& rhs) noexcept {
         mDirty = rhs.mDirty;
         mValid = rhs.mValid;
         mSetAfterCommitWarning = rhs.mSetAfterCommitWarning;
+        mSetUndefinedParameterWarning = rhs.mSetUndefinedParameterWarning;
     }
     return *this;
 }
@@ -106,12 +107,12 @@ void DescriptorSet::commitSlow(DescriptorSetLayout const& layout,
     });
 
     auto const unsetValidDescriptors = layout.getValidDescriptors() & ~mValid;
-    if (UTILS_VERY_UNLIKELY(!unsetValidDescriptors.empty())) {
+    if (UTILS_VERY_UNLIKELY(!unsetValidDescriptors.empty() && !mSetUndefinedParameterWarning)) {
         unsetValidDescriptors.forEachSetBit([&](auto i) {
-            slog.w << (layout.isSampler(i) ? "Sampler" : "Buffer")
-                    << " descriptor " << i << " of " << mName.c_str() << " is not set. "
-                       "Please report this issue." << io::endl;
+            LOG(WARNING) << (layout.isSampler(i) ? "Sampler" : "Buffer") << " descriptor " << i
+                         << " of " << mName.c_str() << " is not set. Please report this issue.";
         });
+        mSetUndefinedParameterWarning = true;
     }
 }
 
@@ -131,9 +132,8 @@ void DescriptorSet::bind(FEngine::DriverApi& driver, DescriptorSetBindingPoints 
     // assert_invariant(mDirty.none());
     if (UTILS_VERY_UNLIKELY(mDirty.any() && !mSetAfterCommitWarning)) {
         mDirty.forEachSetBit([&](uint8_t const binding) {
-            utils::slog.w << "Descriptor set (handle=" << mDescriptorSetHandle.getId()
-                          << ") binding=" << (int) binding
-                          << " was set between begin/endRenderPass" << utils::io::endl;
+            LOG(WARNING) << "Descriptor set (handle=" << mDescriptorSetHandle.getId()
+                         << ") binding=" << (int) binding << " was set between begin/endRenderPass";
         });
         mSetAfterCommitWarning = true;
     }

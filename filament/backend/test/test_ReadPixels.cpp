@@ -150,17 +150,11 @@ TEST_F(ReadPixelsTest, ReadPixels) {
                 memcpy(image.getPixelRef(), pixelData, width * height * sizeof(math::float4));
             }
             std::string png = std::string(testName) + ".png";
-            std::ofstream outputStream(png.c_str(), std::ios::binary | std::ios::trunc);
-            ImageEncoder::encode(outputStream, ImageEncoder::Format::PNG, image, "",
-                    png.c_str());
+            std::filesystem::path path = ScreenshotParams::actualDirectoryPath();
+            path.append(png);
+            std::ofstream outputStream(path.c_str(), std::ios::binary | std::ios::trunc);
+            ImageEncoder::encode(outputStream, ImageEncoder::Format::PNG, image, "", png);
 #endif
-        }
-
-        void exportRawBytes(void* pixelData) const {
-            std::string out = std::string(testName) + ".raw";
-            std::ofstream outputStream(out.c_str(), std::ios::binary | std::ios::trunc);
-            outputStream.write((char*)pixelData, getBufferSizeBytes());
-            outputStream.close();
         }
 
         // The format and type for the readPixels call.
@@ -336,7 +330,6 @@ TEST_F(ReadPixelsTest, ReadPixels) {
                     assert_invariant(test);
 
                     test->exportScreenshot(buffer);
-                    //test->exportRawBytes(buffer);
 
                     // Hash the contents of the buffer and check that they match.
                     uint32_t hash = utils::hash::murmur3((const uint32_t*)buffer, size / 4, 0);

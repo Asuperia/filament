@@ -17,7 +17,7 @@
 #ifndef TNT_FILAMENT_BACKEND_VULKANCONSTANTS_H
 #define TNT_FILAMENT_BACKEND_VULKANCONSTANTS_H
 
-#include <utils/Log.h>
+#include <utils/Logger.h>
 
 #include <stdint.h>
 
@@ -73,8 +73,8 @@
 #define FVK_DEBUG_RESOURCE_LEAK           0x00010000
 
 // Set this to enable logging "only" to one output stream. This is useful in the case where we want
-// to debug with print statements and want ordered logging (e.g slog.i and slog.e will not appear in
-// order of calls).
+// to debug with print statements and want ordered logging (e.g LOG(INFO) and LOG(ERROR) will not
+// appear in order of calls).
 #define FVK_DEBUG_FORCE_LOG_TO_I          0x00020000
 
 // Enable a minimal set of traces to assess the performance of the backend.
@@ -174,15 +174,15 @@ static_assert(FVK_ENABLED(FVK_DEBUG_VALIDATION));
 #endif
 
 #if FVK_ENABLED(FVK_DEBUG_FORCE_LOG_TO_I)
-    #define FVK_LOGI (utils::slog.i)
+    #define FVK_LOGI LOG(INFO)
     #define FVK_LOGD FVK_LOGI
     #define FVK_LOGE FVK_LOGI
     #define FVK_LOGW FVK_LOGI
 #else
-    #define FVK_LOGE (utils::slog.e)
-    #define FVK_LOGW (utils::slog.w)
-    #define FVK_LOGD (utils::slog.d)
-    #define FVK_LOGI (utils::slog.i)
+    #define FVK_LOGE LOG(ERROR)
+    #define FVK_LOGW LOG(WARNING)
+    #define FVK_LOGD DLOG(INFO)
+    #define FVK_LOGI LOG(INFO)
 #endif
 
 // All vkCreate* functions take an optional allocator. For now we select the default allocator by
@@ -213,5 +213,9 @@ constexpr static const int FVK_MAX_PIPELINE_AGE = FVK_MAX_COMMAND_BUFFERS;
 // instead it simply waits for at least FVK_MAX_COMMAND_BUFFERS submissions to occur before
 // destroying any unused pipeline object.
 static_assert(FVK_MAX_PIPELINE_AGE >= FVK_MAX_COMMAND_BUFFERS);
+
+// Whether the buffer updates always use staging or not. Otherwise its allowed to also use memcpy
+// for buffer updates. Default is false
+constexpr static const bool FVK_FORCE_STAGING_FOR_BUFFER_UPDATES = false;
 
 #endif

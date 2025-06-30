@@ -23,6 +23,7 @@
 #include "OpenGLDriver.h"
 
 #include <iterator>
+#include <optional>
 #include <private/backend/BackendUtils.h>
 
 #include <backend/DriverEnums.h>
@@ -30,14 +31,14 @@
 
 #include <private/utils/Tracing.h>
 
-#include <utils/compiler.h>
 #include <utils/CString.h>
-#include <utils/debug.h>
 #include <utils/FixedCapacityVector.h>
 #include <utils/JobSystem.h>
-#include <utils/Log.h>
-#include <utils/ostream.h>
+#include <utils/Logger.h>
 #include <utils/Panic.h>
+#include <utils/compiler.h>
+#include <utils/debug.h>
+#include <utils/ostream.h>
 
 #include <algorithm>
 #include <array>
@@ -64,9 +65,9 @@ static std::string to_string(bool const b) { return b ? "true" : "false"; }
 static std::string to_string(int const i) { return std::to_string(i); }
 static std::string to_string(float const f) { return "float(" + std::to_string(f) + ")"; }
 
-static void logCompilationError(io::ostream& out, ShaderStage shaderType, const char* name,
-        GLuint shaderId, CString const& sourceCode) noexcept;
-static void logProgramLinkError(io::ostream& out, char const* name, GLuint program) noexcept;
+static void logCompilationError(ShaderStage shaderType, const char* name, GLuint shaderId,
+        CString const& sourceCode) noexcept;
+static void logProgramLinkError(char const* name, GLuint program) noexcept;
 
 static void process_GOOGLE_cpp_style_line_directive(OpenGLContext const& context, char* source,
         size_t len) noexcept;
@@ -110,17 +111,33 @@ struct ShaderCompilerService::OpenGLProgramToken : ProgramToken {
         cond.wait(l, [this] { return signaled; });
     }
 
-    CallbackManager::Handle handle{};
+    // This is invoked upon token completion, which occurs after a successful `gl.program`
+    // population or upon cancellation. In either scenario, the callback handle must be submitted
+    // to notify the caller that resource loading has concluded.
+    void trySubmittingCallback() noexcept {
+        if (handle) {
+            compiler.submitCallbackHandle(*handle);
+            handle = std::nullopt;
+        }
+    }
+
+    std::optional<CallbackManager::Handle> handle{};
+
+    // Only valid when the blob functions are provided by users. The validity of this variable
+    // doesn't guarantee that the program was created from the cache blob.
     BlobCacheKey key;
 
     // Used for the `THREAD_POOL` mode.
     mutable Mutex lock;
     mutable Condition cond;
     bool signaled = false;
+
+    // Indicate this program was created from the cache blob.
+    bool retrievedFromBlobCache = false;
 };
 
 ShaderCompilerService::OpenGLProgramToken::~OpenGLProgramToken() {
-    compiler.submitCallbackHandle(handle);
+    trySubmittingCallback();
 }
 
 /* static */ void ShaderCompilerService::setUserData(const program_token_t& token,
@@ -248,6 +265,7 @@ ShaderCompilerService::program_token_t ShaderCompilerService::createProgram(
     // Try retrieving the cached program blob if available.
     token->gl.program = mBlobCache.retrieve(&token->key, mDriver.mPlatform, program);
     if (token->gl.program) {
+        token->retrievedFromBlobCache = true;
         return token;
     }
 
@@ -326,12 +344,15 @@ GLuint ShaderCompilerService::getProgram(program_token_t& token) {
 
     assert_invariant(token);// This function should be called when the token is still alive.
 
-    if (token->compiler.mMode == Mode::THREAD_POOL) {
-        auto const job = token->compiler.mCompilerThreadPool.dequeue(token);
-        if (!job) {
-            // It's likely that the job was already completed. But it may be still being
-            // executed at this moment. Just try waiting for it to avoid a race.
-            token->wait();
+    // Finalize any pending shader compilation tasks only when the token was created without cache.
+    if (!token->retrievedFromBlobCache) {
+        if (token->compiler.mMode == Mode::THREAD_POOL) {
+            auto const job = token->compiler.mCompilerThreadPool.dequeue(token);
+            if (!job) {
+                // It's likely that the job was already completed. But it may be still being
+                // executed at this moment. Just try waiting for it to avoid a race.
+                token->wait();
+            }
         }
     }
 
@@ -339,7 +360,7 @@ GLuint ShaderCompilerService::getProgram(program_token_t& token) {
 
     // Cleanup the token.
     token->compiler.cancelTickOp(token);
-    token = nullptr;// This will submit a callback condition (handle) to the callback manager.
+    token = nullptr; // This will try submitting a callback handle to the callback manager.
 }
 
 void ShaderCompilerService::tick() {
@@ -392,7 +413,7 @@ GLuint ShaderCompilerService::initialize(program_token_t& token) {
 
     // Cleanup the token.
     token->compiler.cancelTickOp(token);
-    token = nullptr;// This will submit a callback condition (handle) to the callback manager.
+    token = nullptr;
 
     return program;
 }
@@ -422,8 +443,9 @@ void ShaderCompilerService::ensureTokenIsReady(program_token_t const& token) {
             // just log warnings here instead of repeatedly checking compile status. If this turns
             // out to be a real issue later, we would need to consider doing the canonical way.
             if (!isCompileCompleted(token)) {
-                slog.w << "Shader compilation for OpenGL program " << token->name.c_str_safe()
-                       << " is not completed yet. The following program link may not succeed.";
+                LOG(WARNING)
+                        << "Shader compilation for OpenGL program " << token->name.c_str_safe()
+                        << " is not completed yet. The following program link may not succeed.";
             }
 
             linkProgram(mDriver.getContext(), token);
@@ -633,8 +655,7 @@ void ShaderCompilerService::executeTickOps() noexcept {
         }
         // Something went wrong. Log the error message.
         const ShaderStage type = static_cast<ShaderStage>(i);
-        logCompilationError(slog.e, type, token->name.c_str_safe(), shader,
-                token->shaderSourceCode[i]);
+        logCompilationError(type, token->name.c_str_safe(), shader, token->shaderSourceCode[i]);
     }
 }
 
@@ -659,6 +680,7 @@ void ShaderCompilerService::executeTickOps() noexcept {
     }
     glLinkProgram(program);
     token->gl.program = program;
+    token->trySubmittingCallback();
 }
 
 /* static */ bool ShaderCompilerService::isLinkCompleted(program_token_t const& token) noexcept {
@@ -685,7 +707,7 @@ void ShaderCompilerService::executeTickOps() noexcept {
     glGetProgramiv(token->gl.program, GL_LINK_STATUS, &status);
     if (UTILS_UNLIKELY(status != GL_TRUE)) {
         // Something went wrong. Log the error message.
-        logProgramLinkError(slog.e, token->name.c_str_safe(), token->gl.program);
+        logProgramLinkError(token->name.c_str_safe(), token->gl.program);
         linked = false;
     }
     // No need to keep the shaders around regardless of the result of the program linking.
@@ -735,7 +757,7 @@ void ShaderCompilerService::executeTickOps() noexcept {
 // ------------------------------------------------------------------------------------------------
 
 UTILS_NOINLINE
-/* static */ void logCompilationError(io::ostream& out, ShaderStage shaderType, const char* name,
+/* static */ void logCompilationError(ShaderStage shaderType, const char* name,
         GLuint const shaderId, UTILS_UNUSED_IN_RELEASE CString const& sourceCode) noexcept {
 
     { // scope for the temporary string storage
@@ -757,8 +779,9 @@ UTILS_NOINLINE
         CString infoLog(length);
         glGetShaderInfoLog(shaderId, length, nullptr, infoLog.data());
 
-        out << "Compilation error in " << to_string(shaderType) << " shader \"" << name << "\":\n"
-            << "\"" << infoLog.c_str() << "\"" << io::endl;
+        LOG(ERROR) << "Compilation error in " << to_string(shaderType) << " shader \"" << name
+                   << "\":";
+        LOG(ERROR) << "\"" << infoLog.c_str() << "\"";
     }
 
 #ifndef NDEBUG
@@ -773,26 +796,25 @@ UTILS_NOINLINE
         } else {
             line = shader.substr(start, end - start);
         }
-        out << lc++ << ":   " << line.c_str() << '\n';
+        LOG(ERROR) << lc++ << ":   " << line.c_str();
         if (end == std::string::npos) {
             break;
         }
         start = end + 1;
     }
-    out << io::endl;
+    LOG(ERROR) << "";
 #endif
 }
 
 UTILS_NOINLINE
-/* static */ void logProgramLinkError(io::ostream& out, char const* name, GLuint program) noexcept {
+/* static */ void logProgramLinkError(char const* name, GLuint program) noexcept {
     GLint length = 0;
     glGetProgramiv(program, GL_INFO_LOG_LENGTH, &length);
 
     CString infoLog(length);
     glGetProgramInfoLog(program, length, nullptr, infoLog.data());
 
-    out << "Link error in \"" << name << "\":\n"
-        << "\"" << infoLog.c_str() << "\"" << io::endl;
+    LOG(ERROR) << "Link error in \"" << name << "\":\n" << "\"" << infoLog.c_str() << "\"";
 }
 
 // If usages of the Google-style line directive are present, remove them, as some

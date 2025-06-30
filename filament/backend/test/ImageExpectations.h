@@ -17,6 +17,7 @@
 #ifndef TNT_IMAGE_EXPECTATIONS_H
 #define TNT_IMAGE_EXPECTATIONS_H
 
+#include <filesystem>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -42,6 +43,7 @@ namespace test {
  */
 class ScreenshotParams {
 public:
+    // TODO(b/422804941): Add a set of environments where this test should use a different golden.
     ScreenshotParams(int width, int height, std::string fileName, uint32_t expectedPixelHash,
             bool isSrgb = false);
 
@@ -50,12 +52,12 @@ public:
     bool isSrgb() const;
     uint32_t expectedHash() const;
 
-    static std::string actualDirectoryPath();
+    static std::filesystem::path actualDirectoryPath();
     std::string actualFileName() const;
-    std::string actualFilePath() const;
-    static std::string expectedDirectoryPath();
+    std::filesystem::path actualFilePath() const;
+    static std::filesystem::path expectedDirectoryPath();
     std::string expectedFileName() const;
-    std::string expectedFilePath() const;
+    std::filesystem::path expectedFilePath() const;
     const std::string filePrefix() const;
 
 private:

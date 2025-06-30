@@ -17,6 +17,8 @@
 #include "VulkanBufferProxy.h"
 
 #include "VulkanBufferCache.h"
+#include "VulkanCommands.h"
+#include "VulkanContext.h"
 #include "VulkanMemory.h"
 
 using namespace bluevk;
@@ -32,14 +34,47 @@ VulkanBufferProxy::VulkanBufferProxy(VmaAllocator allocator, VulkanStagePool& st
       mUpdatedOffset(0),
       mUpdatedBytes(0) {}
 
-void VulkanBufferProxy::loadFromCpu(VkCommandBuffer cmdbuf, const void* cpuData,
+void VulkanBufferProxy::loadFromCpu(VulkanCommandBuffer& commands, const void* cpuData,
         uint32_t byteOffset, uint32_t numBytes) {
-    VulkanStage const* stage = mStagePool.acquireStage(numBytes);
-    void* mapped;
-    vmaMapMemory(mAllocator, stage->memory, &mapped);
-    memcpy(mapped, cpuData, numBytes);
-    vmaUnmapMemory(mAllocator, stage->memory);
-    vmaFlushAllocation(mAllocator, stage->memory, 0, numBytes);
+    // The VulkanBuffer is available if the only object reference is hold by the
+    // `VulkanBufferProxy`. This means that the buffer is not currently referenced by a
+    // `VulkanCommandBuffer`.
+    bool const isAvailable = mBuffer->getCount() == 1;
+
+    if (isAvailable) {
+        // We are up to date with all the update operations, so no need to synchronize with previous
+        // updates.
+        mUpdatedBytes = 0;
+        mUpdatedOffset = 0;
+    }
+
+    // Keep track of the VulkanBuffer usage
+    commands.acquire(mBuffer);
+
+    // Check if we can just memcpy directly to the GPU memory.
+    // This is only allowed for UNIFORMS that are AVAILABLE and the memory is HOST_VISIBLE
+    // (supports memcpy from host). This works regardless if it's a full or partial update of the
+    // buffer.
+    bool const isMemcopyable = mBuffer->getGpuBuffer()->allocationInfo.pMappedData != nullptr;
+    bool const isUniform = getUsage() == VulkanBufferUsage::UNIFORM;
+    bool const useMemcpy =
+            isUniform && isMemcopyable && isAvailable && !FVK_FORCE_STAGING_FOR_BUFFER_UPDATES;
+    if (useMemcpy) {
+        char* dest = static_cast<char*>(mBuffer->getGpuBuffer()->allocationInfo.pMappedData) +
+                     byteOffset;
+        memcpy(dest, cpuData, numBytes);
+        vmaFlushAllocation(mAllocator, mBuffer->getGpuBuffer()->vmaAllocation, byteOffset,
+                numBytes);
+        return;
+    }
+
+    // Note: this should be stored within the command buffer before going out of
+    // scope, so that the command buffer can manage its lifecycle.
+    fvkmemory::resource_ptr<VulkanStage::Segment> stage = mStagePool.acquireStage(numBytes);
+    assert_invariant(stage->memory());
+    commands.acquire(stage);
+    memcpy(stage->mapping(), cpuData, numBytes);
+    vmaFlushAllocation(mAllocator, stage->memory(), stage->offset(), numBytes);
 
     // If there was a previous update, then we need to make sure the following write is properly
     // synced with the previous read.
@@ -68,16 +103,16 @@ void VulkanBufferProxy::loadFromCpu(VkCommandBuffer cmdbuf, const void* cpuData,
             .offset = byteOffset,
             .size = numBytes,
         };
-        vkCmdPipelineBarrier(cmdbuf, srcStage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1,
-                &barrier, 0, nullptr);
+        vkCmdPipelineBarrier(commands.buffer(), srcStage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                nullptr, 1, &barrier, 0, nullptr);
     }
 
     VkBufferCopy region = {
-        .srcOffset = 0,
+        .srcOffset = stage->offset(),
         .dstOffset = byteOffset,
         .size = numBytes,
     };
-    vkCmdCopyBuffer(cmdbuf, stage->buffer, getVkBuffer(), 1, &region);
+    vkCmdCopyBuffer(commands.buffer(), stage->buffer(), getVkBuffer(), 1, &region);
 
     mUpdatedOffset = byteOffset;
     mUpdatedBytes = numBytes;
@@ -113,8 +148,8 @@ void VulkanBufferProxy::loadFromCpu(VkCommandBuffer cmdbuf, const void* cpuData,
         .size = numBytes,
     };
 
-    vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_TRANSFER_BIT, dstStageMask, 0, 0, nullptr, 1,
-            &barrier, 0, nullptr);
+    vkCmdPipelineBarrier(commands.buffer(), VK_PIPELINE_STAGE_TRANSFER_BIT, dstStageMask, 0, 0,
+            nullptr, 1, &barrier, 0, nullptr);
 }
 
 VkBuffer VulkanBufferProxy::getVkBuffer() const noexcept {
@@ -125,4 +160,4 @@ VulkanBufferUsage VulkanBufferProxy::getUsage() const noexcept {
     return mBuffer->getGpuBuffer()->usage;
 }
 
-}// namespace filament::backend
+} // namespace filament::backend
